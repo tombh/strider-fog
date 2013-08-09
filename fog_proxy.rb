@@ -1,6 +1,9 @@
 require 'rubygems'
 require 'fog'
 
+HOME_DIR = '/home/strider'
+REPO_DIR = HOME_DIR + '/repo'
+
 def usage(s)
   $stderr.puts(s)
   $stderr.puts("Usage: #{File.basename($0)}: --jobid <ID> --phase <prepare|test|deploy|cleanup> --cmd \"<UNIX command>\"")
@@ -40,8 +43,9 @@ def ssh_exec!(ssh, command)
   [exit_code, exit_signal]
 end
 
-def remote_cmd ip, cmd, exit_script = true
-  Net::SSH.start(ip, "root", :paranoid => Net::SSH::Verifiers::Null.new) do |ssh|
+def remote_cmd ip, cmd, exit_script = true, user = 'strider'
+  puts "user: #{user}"
+  Net::SSH.start(ip, user, :paranoid => Net::SSH::Verifiers::Null.new) do |ssh|
     # Run the command on the remote server
     exit_code = ssh_exec!(ssh, cmd).first
     # Mirror the exit code to this very script
@@ -85,19 +89,39 @@ if $phase == "prepare"
   puts "Waiting for server to become active..."
 
   server.wait_for { ready? }
+  sleep 1 # Give it a little bit of extra breathing space, man.
   if server.ready?
     puts "Server active."
   else
     raise "Server creation/connection failed."
   end
 
+  puts "Creating 'strider' user on remote server..."
+  remote_cmd(
+    server.ip_address,
+    "useradd -d #{HOME_DIR} -m strider -s /bin/bash && \
+    cp -r /root/.ssh #{HOME_DIR} && \
+    echo \"strider ALL=(ALL) NOPASSWD: ALL\" >> /etc/sudoers",
+    false,
+    'root'
+  )
+
   # The repo needs to be on the remote server before we can test.
   puts "Tarring repo..."
   puts `cd /tmp && tar -zcf repo#{$jobid}.tgz -C #{$dir} . --exclude=".git" 2>&1`
   puts "Copying repo to remote server..."
-  puts `scp -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no /tmp/repo#{$jobid}.tgz root@#{server.ip_address}:/root && echo Copied.`
+  puts `scp \
+          -o UserKnownHostsFile=/dev/null \
+          -o StrictHostKeyChecking=no \
+          /tmp/repo#{$jobid}.tgz \
+          strider@#{server.ip_address}:#{HOME_DIR} \
+          && echo Copied.`
   puts "Unpacking repo on remote..."
-  remote_cmd(server.ip_address, "mkdir -p /root/repo && tar -vzxf repo#{$jobid}.tgz -C /root/repo", false)
+  remote_cmd(
+    server.ip_address,
+    "mkdir -p #{REPO_DIR} && tar -vzxf repo#{$jobid}.tgz -C #{REPO_DIR}",
+    false
+  )
 end
 
 if $phase == "cleanup"
@@ -105,5 +129,5 @@ if $phase == "cleanup"
   server.wait_for { !ready? }
   puts "Server destroyed."
 else
-  remote_cmd(server.ip_address, "cd /root/repo && " + $cmd)
+  remote_cmd(server.ip_address, "cd #{REPO_DIR} && " + $cmd)
 end
